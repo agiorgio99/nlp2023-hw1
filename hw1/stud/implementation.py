@@ -1,5 +1,28 @@
 import numpy as np
 from typing import List
+import torch
+from torch.utils.data import Dataset, DataLoader
+import torch.nn as nn
+
+import pickle
+
+import gensim
+
+from torch.nn.utils.rnn import pad_sequence
+from typing import Any
+from typing import Dict, List
+
+import gensim.downloader
+from gensim.models import KeyedVectors
+
+
+SEED = 1234
+
+import random
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+torch.backends.cudnn.deterministic = True
 
 from model import Model
 
@@ -7,7 +30,9 @@ from model import Model
 def build_model(device: str) -> Model:
     # STUDENT: return StudentModel()
     # STUDENT: your model MUST be loaded on the device "device" indicates
-    return RandomBaseline()
+
+    model = StudentModel(device)
+    return model
 
 
 class RandomBaseline(Model):
@@ -36,13 +61,186 @@ class RandomBaseline(Model):
             for x in tokens
         ]
 
+class EventDetectionDataset(Dataset):
+    def __init__(self, data):
+        super().__init__()
+        self.data = data
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, index):
+        return self.data[index]
+
+
+with open("model/vocabulary.pickle", "rb") as file:
+    vocabulary = pickle.load(file)
+
+with open("model/label_vocabulary.pickle", "rb") as file:
+    label_vocabulary = pickle.load(file)
+
+
+PAD_TOKEN = "<PAD>"
+UNK_TOKEN = "<UNK>"
+
+from numpy.lib.arraypad import pad
+#method that adds paddding to sequences and returns tensors dictionary
+def prepare_batch(batch: List[List[str]]) -> List[Dict]:
+  # extract features from batch
+  x = [sentence for sentence in batch]
+
+  # convert tokens to index 
+  x = [[vocabulary.get(token, vocabulary[UNK_TOKEN]) for token in sentence] for sentence in x]
+
+  # convert features to tensor and pad them
+  x = pad_sequence(
+    [torch.as_tensor(sentence) for sentence in x],
+    batch_first=True,
+    padding_value=vocabulary[PAD_TOKEN]
+  )
+
+  return {"x": x}
+
+def load_torch_embedding_layer(weights: KeyedVectors, padding_idx: int = 0, freeze: bool = False):
+    vectors = weights.vectors
+    # random vector for pad
+    pad = np.random.rand(1, vectors.shape[1])
+    print(pad.shape)
+    # mean vector for unknowns
+    unk = np.mean(vectors, axis=0, keepdims=True)
+    print(unk.shape)
+    # concatenate pad and unk vectors on top of pre-trained weights
+    vectors = np.concatenate((pad, unk, vectors))
+    # convert to pytorch tensor
+    vectors = torch.FloatTensor(vectors)
+    # and return the embedding layer
+    return torch.nn.Embedding.from_pretrained(vectors, padding_idx=padding_idx, freeze=freeze)
+
+class EventDetectionModel(nn.Module):
+    # we provide the hyperparameters as input
+    def __init__(self, hparams, weights):
+        super(EventDetectionModel, self).__init__()
+        # Embedding layer: a matrix vocab_size x embedding_dim where each index 
+        # correspond to a word in the vocabulary and the i-th row corresponds to 
+        # a latent representation of the i-th word in the vocabulary.
+
+        self.word_embedding = load_torch_embedding_layer(weights)
+        #self.word_embedding = nn.Embedding(hparams.vocab_size, hparams.embedding_dim)
+        if hparams.embeddings is not None:
+            print("initializing embeddings from pretrained")
+            self.word_embedding.weight.data.copy_(hparams.embeddings)
+
+        # LSTM layer: an LSTM neural network that process the input text
+        # (encoded with word embeddings) from left to right and outputs 
+        # a new **contextual** representation of each word that depend
+        # on the preciding words.
+        self.lstm = nn.LSTM(hparams.embedding_dim, hparams.hidden_dim, 
+                            bidirectional=hparams.bidirectional,
+                            num_layers=hparams.num_layers, 
+                            dropout = hparams.dropout if hparams.num_layers > 1 else 0)
+        # Hidden layer: transforms the input value/scalar into
+        # a hidden vector representation.
+        lstm_output_dim = hparams.hidden_dim if hparams.bidirectional is False else hparams.hidden_dim * 2
+
+        # During training, randomly zeroes some of the elements of the 
+        # input tensor with probability hparams.dropout using samples 
+        # from a Bernoulli distribution. Each channel will be zeroed out 
+        # independently on every forward call.
+        # This has proven to be an effective technique for regularization and 
+        # preventing the co-adaptation of neurons
+        self.dropout = nn.Dropout(hparams.dropout)
+        self.classifier = nn.Linear(lstm_output_dim, hparams.num_classes)
+
+    def forward(self, x):
+        embeddings = self.word_embedding(x)
+        embeddings = self.dropout(embeddings)
+        o, (h, c) = self.lstm(embeddings)
+        o = self.dropout(o)
+        output = self.classifier(o)
+        return output
+
+class HParams():
+    vocab_size = len(vocabulary)
+    hidden_dim = 128
+    embedding_dim = 50
+    num_classes = len(label_vocabulary) # number of different universal Event tags
+    bidirectional = False
+    num_layers = 1
+    dropout = 0.0
+    embeddings = None
+    batch_size = 32
+    epochs = 10
 
 class StudentModel(Model):
 
     # STUDENT: construct here your model
     # this class should be loading your weights and vocabulary
+    
+    def __init__(self, device):
+        super(StudentModel, self).__init__()
+        self.device = device
+        
+        with open("model/index_to_label_vocab.pickle", "rb") as file:
+            self.index_to_label_vocab = pickle.load(file)
+
+        self.hparams = HParams()
+
+        self.vocabulary = vocabulary
+
+        self.label_vocabulary = label_vocabulary
+
+        self.weights = KeyedVectors.load('model/glove_vectors.bin')
+
+        self.model = EventDetectionModel(self.hparams, self.weights).to(device)
+
+
 
     def predict(self, tokens: List[List[str]]) -> List[List[str]]:
         # STUDENT: implement here your predict function
         # remember to respect the same order of tokens!
-        pass
+
+        #print("This is the size of tokens list: ", len(tokens))
+        #print(tokens)
+        # for i in range(len(tokens)):
+        #     print("This is the size of i-th tokens list: ", len(tokens[i]))
+        testset = EventDetectionDataset(tokens)
+
+        # data loader parameters
+        collate_fn = prepare_batch
+
+        test_dataloader = DataLoader(testset, collate_fn=collate_fn, batch_size=self.hparams.batch_size, shuffle=False)
+
+        self.model.load_state_dict(torch.load("model/model.pth", map_location=torch.device('cpu')))
+
+        total_predictions = []
+        for batch in test_dataloader:
+            inputs = batch["x"].to(self.device)
+            self.model.eval()
+            with torch.no_grad():
+                logits = self.model(inputs.long())
+                predictions = torch.argmax(logits, -1)
+                prediction_list = predictions.tolist()
+                # batch_predictions = list(filter(lambda x: x != 0, prediction_list))
+                # for i in range(len(batch_predictions)):
+                #     print("This is the size of i-th perdiction list: ", len(batch_predictions[i]))
+                # for i in range(len(prediction_list)):
+                #     print("These are the predictions before removing 0: ", prediction_list[i])
+                #     while 0 in prediction_list[i]:
+                #         prediction_list[i].remove(0)
+                #     print("These are the predictions AFTER removing 0: ", prediction_list[i])
+                total_predictions.extend(prediction_list)
+        
+        #print("This is the size of prediction list: ", len(total_predictions))
+        #print(total_predictions)
+        total_predictions_tokens = [[self.index_to_label_vocab[label] for label in sample] for sample in total_predictions]
+        #print("This is the size of prediction  tokens list: ", len(total_predictions_tokens))
+        #print(total_predictions_tokens)
+        
+        #remove the padding, in order to make the evaluation possible
+        final_predictions = []
+        for i in range(len(total_predictions_tokens)):
+            ith_prediction = total_predictions_tokens[i]
+            predictions_without_padding = ith_prediction[:len(tokens[i])]
+            final_predictions.append(predictions_without_padding)
+
+        return final_predictions
