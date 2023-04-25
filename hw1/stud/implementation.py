@@ -118,29 +118,23 @@ def load_torch_embedding_layer(weights: KeyedVectors, padding_idx: int = 0, free
 
 class EventDetectionModel(nn.Module):
     # we provide the hyperparameters as input
-    def __init__(self, hparams, weights):
+    def __init__(self, hparams, word_weights):
         super(EventDetectionModel, self).__init__()
         # Embedding layer: a matrix vocab_size x embedding_dim where each index 
         # correspond to a word in the vocabulary and the i-th row corresponds to 
         # a latent representation of the i-th word in the vocabulary.
-
-        self.word_embedding = load_torch_embedding_layer(weights)
-        #self.word_embedding = nn.Embedding(hparams.vocab_size, hparams.embedding_dim)
-        if hparams.embeddings is not None:
-            print("initializing embeddings from pretrained")
-            self.word_embedding.weight.data.copy_(hparams.embeddings)
-
+        self.word_embedding = load_torch_embedding_layer(word_weights)
         # LSTM layer: an LSTM neural network that process the input text
         # (encoded with word embeddings) from left to right and outputs 
         # a new **contextual** representation of each word that depend
         # on the preciding words.
-        self.lstm = nn.LSTM(hparams.embedding_dim, hparams.hidden_dim, 
-                            bidirectional=hparams.bidirectional,
-                            num_layers=hparams.num_layers, 
-                            dropout = hparams.dropout if hparams.num_layers > 1 else 0)
+        self.lstm = nn.LSTM(hparams["word_embedding_dim"], hparams["hidden_dim"], 
+                            bidirectional=hparams["bidirectional"],
+                            num_layers=hparams["num_layers"], 
+                            dropout = hparams["dropout"] if hparams["num_layers"] > 1 else 0)
         # Hidden layer: transforms the input value/scalar into
         # a hidden vector representation.
-        lstm_output_dim = hparams.hidden_dim if hparams.bidirectional is False else hparams.hidden_dim * 2
+        lstm_output_dim = hparams["hidden_dim"] if hparams["bidirectional"] is False else hparams["hidden_dim"] * 2
 
         # During training, randomly zeroes some of the elements of the 
         # input tensor with probability hparams.dropout using samples 
@@ -148,9 +142,10 @@ class EventDetectionModel(nn.Module):
         # independently on every forward call.
         # This has proven to be an effective technique for regularization and 
         # preventing the co-adaptation of neurons
-        self.dropout = nn.Dropout(hparams.dropout)
-        self.classifier = nn.Linear(lstm_output_dim, hparams.num_classes)
+        self.dropout = nn.Dropout(hparams["dropout"])
+        self.classifier = nn.Linear(lstm_output_dim, hparams["num_classes"])
 
+    
     def forward(self, x):
         embeddings = self.word_embedding(x)
         embeddings = self.dropout(embeddings)
@@ -159,17 +154,6 @@ class EventDetectionModel(nn.Module):
         output = self.classifier(o)
         return output
 
-class HParams():
-    vocab_size = len(vocabulary)
-    hidden_dim = 128
-    embedding_dim = 50
-    num_classes = len(label_vocabulary) # number of different universal Event tags
-    bidirectional = False
-    num_layers = 1
-    dropout = 0.0
-    embeddings = None
-    batch_size = 32
-    epochs = 10
 
 class StudentModel(Model):
 
@@ -182,14 +166,16 @@ class StudentModel(Model):
         
         with open("model/index_to_label_vocab.pickle", "rb") as file:
             self.index_to_label_vocab = pickle.load(file)
-
-        self.hparams = HParams()
+        
+        with open("model/best_params.pickle", "rb") as file:
+            self.hparams = pickle.load(file)
 
         self.vocabulary = vocabulary
 
         self.label_vocabulary = label_vocabulary
 
-        self.weights = KeyedVectors.load('model/glove_vectors.bin')
+        with open("model/"+self.hparams["word_embeddings"]+".pickle", "rb") as file:
+            self.weights = pickle.load(file)
 
         self.model = EventDetectionModel(self.hparams, self.weights).to(device)
 
@@ -199,16 +185,12 @@ class StudentModel(Model):
         # STUDENT: implement here your predict function
         # remember to respect the same order of tokens!
 
-        #print("This is the size of tokens list: ", len(tokens))
-        #print(tokens)
-        # for i in range(len(tokens)):
-        #     print("This is the size of i-th tokens list: ", len(tokens[i]))
         testset = EventDetectionDataset(tokens)
 
         # data loader parameters
         collate_fn = prepare_batch
 
-        test_dataloader = DataLoader(testset, collate_fn=collate_fn, batch_size=self.hparams.batch_size, shuffle=False)
+        test_dataloader = DataLoader(testset, collate_fn=collate_fn, batch_size=self.hparams["batch_size"], shuffle=False)
 
         self.model.load_state_dict(torch.load("model/model.pth", map_location=torch.device('cpu')))
 
@@ -220,21 +202,9 @@ class StudentModel(Model):
                 logits = self.model(inputs.long())
                 predictions = torch.argmax(logits, -1)
                 prediction_list = predictions.tolist()
-                # batch_predictions = list(filter(lambda x: x != 0, prediction_list))
-                # for i in range(len(batch_predictions)):
-                #     print("This is the size of i-th perdiction list: ", len(batch_predictions[i]))
-                # for i in range(len(prediction_list)):
-                #     print("These are the predictions before removing 0: ", prediction_list[i])
-                #     while 0 in prediction_list[i]:
-                #         prediction_list[i].remove(0)
-                #     print("These are the predictions AFTER removing 0: ", prediction_list[i])
                 total_predictions.extend(prediction_list)
         
-        #print("This is the size of prediction list: ", len(total_predictions))
-        #print(total_predictions)
         total_predictions_tokens = [[self.index_to_label_vocab[label] for label in sample] for sample in total_predictions]
-        #print("This is the size of prediction  tokens list: ", len(total_predictions_tokens))
-        #print(total_predictions_tokens)
         
         #remove the padding, in order to make the evaluation possible
         final_predictions = []
