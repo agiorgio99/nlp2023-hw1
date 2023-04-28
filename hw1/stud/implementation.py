@@ -15,6 +15,8 @@ from typing import Dict, List
 import gensim.downloader
 from gensim.models import KeyedVectors
 
+import nltk
+nltk.download("averaged_perceptron_tagger")
 
 SEED = 1234
 
@@ -76,9 +78,8 @@ class EventDetectionDataset(Dataset):
 with open("model/vocabulary.pickle", "rb") as file:
     vocabulary = pickle.load(file)
 
-with open("model/label_vocabulary.pickle", "rb") as file:
-    label_vocabulary = pickle.load(file)
-
+with open("model/pos_vocabulary.pickle", "rb") as file:
+    pos_vocabulary = pickle.load(file)
 
 PAD_TOKEN = "<PAD>"
 UNK_TOKEN = "<UNK>"
@@ -86,11 +87,20 @@ UNK_TOKEN = "<UNK>"
 from numpy.lib.arraypad import pad
 #method that adds paddding to sequences and returns tensors dictionary
 def prepare_batch(batch: List[List[str]]) -> List[Dict]:
-  # extract features from batch
+  # extract features and labels from batch
   x = [sentence for sentence in batch]
+  
+  pos = []
+  #obtain pos tags
+  for sentence in x:
+      sentence_tags = nltk.pos_tag(sentence)
+      sentence_pos_tags = [token[1] for token in sentence_tags]
+      pos.append(sentence_pos_tags)
 
   # convert tokens to index 
   x = [[vocabulary.get(token, vocabulary[UNK_TOKEN]) for token in sentence] for sentence in x]
+  # convert pos_tags to index
+  pos = [[pos_vocabulary.get(token, pos_vocabulary[UNK_TOKEN]) for token in sentence] for sentence in pos]
 
   # convert features to tensor and pad them
   x = pad_sequence(
@@ -98,8 +108,15 @@ def prepare_batch(batch: List[List[str]]) -> List[Dict]:
     batch_first=True,
     padding_value=vocabulary[PAD_TOKEN]
   )
-
-  return {"x": x}
+  # convert and pad pos_tags too
+  pos = pad_sequence(
+    [torch.as_tensor(sentence) for sentence in pos],
+    batch_first=True,
+    padding_value=pos_vocabulary[PAD_TOKEN]
+  )
+  
+  return {"x": x, "pos": pos}
+  
 
 def load_torch_embedding_layer(weights: KeyedVectors, padding_idx: int = 0, freeze: bool = False):
     vectors = weights.vectors
@@ -117,37 +134,32 @@ def load_torch_embedding_layer(weights: KeyedVectors, padding_idx: int = 0, free
     return torch.nn.Embedding.from_pretrained(vectors, padding_idx=padding_idx, freeze=freeze)
 
 class EventDetectionModel(nn.Module):
-    # we provide the hyperparameters as input
+  
     def __init__(self, hparams, word_weights):
         super(EventDetectionModel, self).__init__()
-        # Embedding layer: a matrix vocab_size x embedding_dim where each index 
-        # correspond to a word in the vocabulary and the i-th row corresponds to 
-        # a latent representation of the i-th word in the vocabulary.
+
+        #Word embeddings
         self.word_embedding = load_torch_embedding_layer(word_weights)
-        # LSTM layer: an LSTM neural network that process the input text
-        # (encoded with word embeddings) from left to right and outputs 
-        # a new **contextual** representation of each word that depend
-        # on the preciding words.
-        self.lstm = nn.LSTM(hparams["word_embedding_dim"], hparams["hidden_dim"], 
+
+        # POS embeddings
+        self.pos_embedding = nn.Embedding(hparams["pos_embedding_dim"], hparams["word_embedding_dim"])
+
+        self.lstm = nn.LSTM(hparams["word_embedding_dim"]*2, hparams["hidden_dim"], 
                             bidirectional=hparams["bidirectional"],
                             num_layers=hparams["num_layers"], 
                             dropout = hparams["dropout"] if hparams["num_layers"] > 1 else 0)
-        # Hidden layer: transforms the input value/scalar into
-        # a hidden vector representation.
+        
         lstm_output_dim = hparams["hidden_dim"] if hparams["bidirectional"] is False else hparams["hidden_dim"] * 2
 
-        # During training, randomly zeroes some of the elements of the 
-        # input tensor with probability hparams.dropout using samples 
-        # from a Bernoulli distribution. Each channel will be zeroed out 
-        # independently on every forward call.
-        # This has proven to be an effective technique for regularization and 
-        # preventing the co-adaptation of neurons
         self.dropout = nn.Dropout(hparams["dropout"])
         self.classifier = nn.Linear(lstm_output_dim, hparams["num_classes"])
 
     
-    def forward(self, x):
+    def forward(self, x, pos):
         embeddings = self.word_embedding(x)
+        pos_embeddings = self.pos_embedding(pos)
+        # concatenate the two embeddings
+        embeddings = torch.cat((embeddings, pos_embeddings), dim=2)
         embeddings = self.dropout(embeddings)
         o, (h, c) = self.lstm(embeddings)
         o = self.dropout(o)
@@ -169,10 +181,11 @@ class StudentModel(Model):
         
         with open("model/best_params.pickle", "rb") as file:
             self.hparams = pickle.load(file)
+            print(self.hparams)
 
         self.vocabulary = vocabulary
 
-        self.label_vocabulary = label_vocabulary
+        self.pos_vocabulary = pos_vocabulary
 
         with open("model/"+self.hparams["word_embeddings"]+".pickle", "rb") as file:
             self.weights = pickle.load(file)
@@ -192,14 +205,15 @@ class StudentModel(Model):
 
         test_dataloader = DataLoader(testset, collate_fn=collate_fn, batch_size=self.hparams["batch_size"], shuffle=False)
 
-        self.model.load_state_dict(torch.load("model/model.pth", map_location=torch.device('cpu')))
+        self.model.load_state_dict(torch.load("model/best_model.pth", map_location=torch.device('cpu')))
 
         total_predictions = []
         for batch in test_dataloader:
             inputs = batch["x"].to(self.device)
+            pos_tags = batch["pos"].to(self.device)
             self.model.eval()
             with torch.no_grad():
-                logits = self.model(inputs.long())
+                logits = self.model(inputs.long(), pos_tags.long())
                 predictions = torch.argmax(logits, -1)
                 prediction_list = predictions.tolist()
                 total_predictions.extend(prediction_list)

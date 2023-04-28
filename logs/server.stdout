@@ -1,7 +1,8 @@
-2023-04-24T10:48:02.474859899Z (1, 50)
-2023-04-24T10:48:02.474907334Z (1, 50)
-2023-04-24T10:48:02.474912393Z  * Serving Flask app 'app' (lazy loading)
-2023-04-24T10:48:02.474915604Z  * Environment: production
-2023-04-24T10:48:02.474918750Z    WARNING: This is a development server. Do not use it in a production deployment.
-2023-04-24T10:48:02.475513786Z    Use a production WSGI server instead.
-2023-04-24T10:48:02.475525812Z  * Debug mode: off
+2023-04-28T09:50:05.724793237Z {'test_f1': 0.7085, 'vocab_size': 38009, 'num_classes': 12, 'word_embeddings': 'glove-wiki-gigaword-50', 'word_embedding_dim': 50, 'pos_embedding_dim': 50, 'hidden_dim': 128, 'bidirectional': True, 'num_layers': 3, 'dropout': 0.5, 'batch_size': 128, 'optimizer': 'Adam', 'learning_rate': 0.001, 'epochs': 100}
+2023-04-28T09:50:05.724823731Z (1, 50)
+2023-04-28T09:50:05.724827812Z (1, 50)
+2023-04-28T09:50:05.724831082Z  * Serving Flask app 'app' (lazy loading)
+2023-04-28T09:50:05.724834175Z  * Environment: production
+2023-04-28T09:50:05.724837376Z    WARNING: This is a development server. Do not use it in a production deployment.
+2023-04-28T09:50:05.724840530Z    Use a production WSGI server instead.
+2023-04-28T09:50:05.724843727Z  * Debug mode: off
